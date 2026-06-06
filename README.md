@@ -19,10 +19,24 @@ python orbital_mechanic.py
 
 ## Controls
 
+Most common actions are now clickable in the **Quick Controls** panel:
+
+- `Sat` / `Moon`: choose the launch target
+- `Launch`, `Orbit`, `Rev`: launch normally, auto-orbit, or reverse auto-orbit
+- `Pause`, `Step`, `Reset`, `Clear`, `Ghost`, `Center`: simulation and view actions
+- `Time -`, `1x`, `Time +`: scrub simulation speed
+- `Earth`, `Moon`, `Sat`, `G -`, `G 1x`, `G +`: choose and adjust gravity
+
+Keyboard and mouse shortcuts still work:
+
 - `H` or the `Hide` / `HUD` button: hide or restore menus, readouts, prediction, and launch controls
 - Mouse wheel: zoom the camera in or out around Earth
+- Right-click drag: pan the camera
+- `F`: recenter the camera on Earth
 - `Tab`: switch between satellite launch mode and moon launch mode
 - `S` / `M`: select the satellite or moon directly
+- `O`: place the selected body into a near-circular orbit around Earth
+- `Shift` + `O`: place the selected body into a reverse near-circular orbit
 - `1` / `2` / `3`: choose whose gravity multiplier to edit: Earth, moon, or satellite
 - `[` / `]`: lower or raise the selected gravity multiplier
 - `Shift` + `[` / `]`: make a larger gravity adjustment

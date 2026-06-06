@@ -224,6 +224,8 @@ class Simulator:
         self.show_prediction = True
         self.show_hud = True
         self.camera_zoom = 1.0
+        self.camera_offset = pygame.Vector2()
+        self.panning_camera = False
         self.hud_button_rect = pygame.Rect(WIDTH // 2 - 34, 18, 68, 28)
         self.message = "Satellite selected. Set a vector, then press Space."
         self.update_launch_vectors()
@@ -236,7 +238,7 @@ class Simulator:
         return next((body for body in self.bodies if body.name == name), None)
 
     def camera_center(self) -> pygame.Vector2:
-        return pygame.Vector2(self.planet.pos)
+        return pygame.Vector2(self.planet.pos) + self.camera_offset
 
     def world_to_screen(self, point: pygame.Vector2 | tuple[float, float]) -> pygame.Vector2:
         return (pygame.Vector2(point) - self.camera_center()) * self.camera_zoom + CENTER
@@ -253,6 +255,129 @@ class Simulator:
         self.camera_zoom *= ZOOM_STEP ** wheel_delta
         self.camera_zoom = max(MIN_CAMERA_ZOOM, min(MAX_CAMERA_ZOOM, self.camera_zoom))
         self.message = f"Camera zoom set to {self.camera_zoom:.2f}x"
+
+    def pan_camera(self, pixel_delta: pygame.Vector2) -> None:
+        self.camera_offset -= pixel_delta / self.camera_zoom
+        self.message = "Camera panned. Press F to follow Earth."
+
+    def reset_camera_pan(self) -> None:
+        self.camera_offset.update(0, 0)
+        self.message = "Camera recentered on Earth."
+
+    def quick_buttons(self) -> list[tuple[pygame.Rect, str, str, bool]]:
+        x = WIDTH - 370
+        y = 64
+        gap = 8
+        row = 34
+        w2 = 78
+        w3 = 66
+        wide = 108
+        buttons: list[tuple[pygame.Rect, str, str, bool]] = []
+
+        def add(
+            col: int,
+            line: int,
+            width: int,
+            label: str,
+            action: str,
+            active: bool = False,
+        ) -> None:
+            buttons.append(
+                (
+                    pygame.Rect(x + col, y + line * row, width, 26),
+                    label,
+                    action,
+                    active,
+                )
+            )
+
+        add(0, 0, w2, "Sat", "select_satellite", self.selected_launch == "satellite")
+        add(w2 + gap, 0, w2, "Moon", "select_moon", self.selected_launch == "moon")
+        add(0, 1, w2, "Launch", "launch")
+        add(w2 + gap, 1, w2, "Orbit", "orbit")
+        add((w2 + gap) * 2, 1, w2, "Rev", "reverse_orbit")
+
+        add(0, 2, w2, "Pause" if not self.paused else "Resume", "pause", self.paused)
+        add(w2 + gap, 2, w2, "Step", "step")
+        add((w2 + gap) * 2, 2, w2, "Reset", "reset")
+        add(0, 3, w2, "Clear", "clear")
+        add(w2 + gap, 3, w2, "Ghost", "ghost", self.show_prediction)
+        add((w2 + gap) * 2, 3, w2, "Center", "center")
+
+        add(0, 4, w3, "Time -", "time_down")
+        add(w3 + gap, 4, w3, "1x", "time_reset", self.time_scale == 1.0)
+        add((w3 + gap) * 2, 4, w3, "Time +", "time_up")
+
+        add(0, 5, w3, "Earth", "gravity_earth", self.gravity_target == "earth")
+        add(w3 + gap, 5, w3, "Moon", "gravity_moon", self.gravity_target == "moon")
+        add((w3 + gap) * 2, 5, w3, "Sat", "gravity_satellite", self.gravity_target == "satellite")
+        add(0, 6, w3, "G -", "gravity_down")
+        add(w3 + gap, 6, w3, "G 1x", "gravity_reset")
+        add((w3 + gap) * 2, 6, w3, "G +", "gravity_up")
+
+        return buttons
+
+    def handle_quick_button(self, mouse_pos: tuple[int, int]) -> bool:
+        if not self.show_hud:
+            return False
+
+        for rect, _, action, _ in self.quick_buttons():
+            if not rect.collidepoint(mouse_pos):
+                continue
+
+            if action == "select_satellite":
+                self.select_launch("satellite")
+            elif action == "select_moon":
+                self.select_launch("moon")
+            elif action == "launch":
+                self.launch_selected()
+            elif action == "orbit":
+                self.auto_orbit_selected()
+            elif action == "reverse_orbit":
+                self.auto_orbit_selected(reverse=True)
+            elif action == "pause":
+                self.paused = not self.paused
+                self.message = "Simulation paused." if self.paused else "Simulation resumed."
+            elif action == "step":
+                if self.paused:
+                    self.step_paused_frame()
+                else:
+                    self.message = "Pause first, then use Step."
+            elif action == "reset":
+                self.reset()
+            elif action == "clear":
+                for body in self.bodies:
+                    body.trail.clear()
+                self.message = "Trails cleared."
+            elif action == "ghost":
+                self.show_prediction = not self.show_prediction
+                state = "shown" if self.show_prediction else "hidden"
+                self.message = f"Orbit prediction {state}."
+            elif action == "center":
+                self.reset_camera_pan()
+            elif action == "time_down":
+                self.adjust_time_index(-1)
+            elif action == "time_reset":
+                self.reset_time_scale()
+            elif action == "time_up":
+                self.adjust_time_index(1)
+            elif action == "gravity_earth":
+                self.select_gravity_target("earth")
+            elif action == "gravity_moon":
+                self.select_gravity_target("moon")
+            elif action == "gravity_satellite":
+                self.select_gravity_target("satellite")
+            elif action == "gravity_down":
+                self.adjust_gravity_scale(-0.05)
+            elif action == "gravity_reset":
+                self.reset_gravity_scale()
+            elif action == "gravity_up":
+                self.adjust_gravity_scale(0.05)
+            elif action == "hud":
+                self.toggle_hud()
+            return True
+
+        return False
 
     def clone_body(self, body: Body) -> Body:
         return Body(
@@ -324,6 +449,28 @@ class Simulator:
             self.satellite_angle, self.satellite_speed
         )
         self.moon_vector = vector_from_angle(self.moon_angle, self.moon_speed)
+
+    def circular_orbit_vector_at(
+        self, world_point: pygame.Vector2, reverse: bool = False
+    ) -> pygame.Vector2:
+        radial = pygame.Vector2(world_point) - self.planet.pos
+        if radial.length_squared() == 0:
+            radial = pygame.Vector2(1, 0)
+        distance = max(radial.length(), self.planet.radius + 1)
+        direction = radial.normalize().rotate(-90 if reverse else 90)
+        earth_gravity = self.planet.mass * self.planet.gravity_scale
+        speed = math.sqrt(G * earth_gravity / distance)
+        return direction * speed
+
+    def set_vector_from_orbit(self, target: str, vector: pygame.Vector2) -> None:
+        if target == "moon":
+            self.moon_vector = pygame.Vector2(vector)
+            self.moon_speed = vector.length()
+            self.moon_angle = math.degrees(math.atan2(vector.y, vector.x))
+        else:
+            self.satellite_vector = pygame.Vector2(vector)
+            self.satellite_speed = vector.length()
+            self.satellite_angle = math.degrees(math.atan2(vector.y, vector.x))
 
     def active_vector(self) -> pygame.Vector2:
         return self.moon_vector if self.selected_launch == "moon" else self.satellite_vector
@@ -458,6 +605,19 @@ class Simulator:
         else:
             self.launch_satellite()
 
+    def auto_orbit_selected(self, reverse: bool = False) -> None:
+        if self.selected_launch == "moon":
+            vector = self.circular_orbit_vector_at(self.moon_launch_point(), reverse)
+            self.set_vector_from_orbit("moon", vector)
+            self.launch_moon()
+        else:
+            vector = self.circular_orbit_vector_at(self.satellite_launch_point(), reverse)
+            self.set_vector_from_orbit("satellite", vector)
+            self.launch_satellite()
+
+        direction = "reverse " if reverse else ""
+        self.message = f"{self.selected_launch.title()} placed in {direction}circular orbit."
+
     def apply_moon_velocity(self) -> None:
         moon = self.find_body("moon")
         if not moon or not moon.alive:
@@ -488,6 +648,8 @@ class Simulator:
 
         if key == pygame.K_SPACE:
             self.launch_selected()
+        elif key == pygame.K_o:
+            self.auto_orbit_selected(reverse=bool(mods & pygame.KMOD_SHIFT))
         elif key == pygame.K_TAB:
             self.select_launch("moon" if self.selected_launch == "satellite" else "satellite")
         elif key == pygame.K_s:
@@ -512,6 +674,8 @@ class Simulator:
             self.message = f"Orbit prediction {state}."
         elif key == pygame.K_h:
             self.toggle_hud()
+        elif key == pygame.K_f:
+            self.reset_camera_pan()
         elif key == pygame.K_p:
             self.paused = not self.paused
         elif key == pygame.K_r:
@@ -562,9 +726,13 @@ class Simulator:
                 self.handle_key(event.key, pygame.key.get_mods())
             if event.type == pygame.MOUSEWHEEL:
                 self.adjust_camera_zoom(event.y)
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                self.panning_camera = True
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if self.hud_button_rect.collidepoint(event.pos):
                     self.toggle_hud()
+                    continue
+                if self.handle_quick_button(event.pos):
                     continue
                 mouse_world = self.screen_to_world(event.pos)
                 if self.is_clicking_moon(mouse_world):
@@ -575,8 +743,12 @@ class Simulator:
                 self.dragging = True
                 self.drag_start = self.active_launch_point()
                 self.drag_end = mouse_world
+            if event.type == pygame.MOUSEMOTION and self.panning_camera:
+                self.pan_camera(pygame.Vector2(event.rel))
             if event.type == pygame.MOUSEMOTION and self.dragging:
                 self.drag_end = self.screen_to_world(event.pos)
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 3:
+                self.panning_camera = False
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.dragging:
                 self.dragging = False
                 vector = (self.screen_to_world(event.pos) - self.drag_start) * DRAG_TO_VELOCITY
@@ -1100,6 +1272,53 @@ class Simulator:
     ) -> None:
         self.screen.blit(self.small_font.render(value, True, color), (x, y))
 
+    def draw_button(
+        self,
+        rect: pygame.Rect,
+        label: str,
+        active: bool = False,
+        color: tuple[int, int, int] = MUTED,
+    ) -> None:
+        fill = (34, 43, 61) if not active else (46, 83, 111)
+        border = (76, 91, 117) if not active else ORBIT_BLUE
+        pygame.draw.rect(self.screen, fill, rect, border_radius=6)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=6)
+        text_color = TEXT if active else color
+        rendered = self.small_font.render(label, True, text_color)
+        self.screen.blit(
+            rendered,
+            (
+                rect.centerx - rendered.get_width() // 2,
+                rect.centery - rendered.get_height() // 2,
+            ),
+        )
+
+    def draw_quick_controls(self) -> None:
+        help_x = WIDTH - 388
+        help_rect = pygame.Rect(help_x, 18, 370, 382)
+        pygame.draw.rect(self.screen, PANEL, help_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (55, 66, 88), help_rect, 1, border_radius=8)
+        self.text("Quick Controls", help_x + 18, 34)
+
+        for rect, label, action, active in self.quick_buttons():
+            button_color = TEXT
+            if action.startswith("gravity"):
+                button_color = WARNING if active else MUTED
+            elif action in {"select_satellite", "launch", "orbit", "reverse_orbit"}:
+                button_color = ORBIT_BLUE if active else MUTED
+            elif action == "select_moon":
+                button_color = MOON_GREY if active else MUTED
+            self.draw_button(rect, label, active, button_color)
+
+        hints = [
+            "Mouse wheel zooms. Right drag pans.",
+            "Click/drag moon to edit live velocity.",
+            "Arrows tune selected launch vector.",
+            "Keyboard shortcuts still work.",
+        ]
+        for index, line in enumerate(hints):
+            self.small_text(line, help_x + 18, 318 + index * 15)
+
     def draw_panel(self) -> None:
         panel_rect = pygame.Rect(18, 18, 430, 342)
         pygame.draw.rect(self.screen, PANEL, panel_rect, border_radius=8)
@@ -1110,6 +1329,7 @@ class Simulator:
 
         self.text(f"selected: {self.selected_launch}", 35, 90, self.active_color())
         prediction_state = "on" if self.show_prediction else "off"
+        pan_distance = self.camera_offset.length()
         self.text(f"t:{self.time_scale:4.2f}x z:{self.camera_zoom:.2f}", 230, 90)
         self.small_text(
             f"gravity target: {self.gravity_target}",
@@ -1125,6 +1345,8 @@ class Simulator:
             142,
             TEXT,
         )
+        if pan_distance > 1:
+            self.small_text(f"camera pan {pan_distance:.0f}px", 260, 120, MUTED)
         self.small_text("Satellite vector", 35, 170, ORBIT_BLUE)
         self.text(
             f"vx {self.satellite_vector.x:6.2f}  vy {self.satellite_vector.y:6.2f}",
@@ -1155,32 +1377,7 @@ class Simulator:
         status_color = WARNING if lost_satellite or lost_moon else MUTED
         self.small_text(self.message, 35, 326, status_color)
 
-        help_x = WIDTH - 388
-        help_rect = pygame.Rect(help_x, 18, 370, 328)
-        pygame.draw.rect(self.screen, PANEL, help_rect, border_radius=8)
-        pygame.draw.rect(self.screen, (55, 66, 88), help_rect, 1, border_radius=8)
-        self.text("Controls", help_x + 18, 34)
-        controls = [
-            "H / Hide button: toggle HUD",
-            "Mouse wheel: zoom view",
-            "Tab: switch satellite/moon",
-            "Click moon: edit its live velocity",
-            "S / M: select satellite or moon",
-            "1/2/3: edit Earth/moon/sat gravity",
-            "[ / ]: lower/raise gravity",
-            "0: reset selected gravity",
-            "G: toggle ghost prediction",
-            ", / . or +/-: scrub time speed",
-            "T: normal time   N: step paused",
-            "Left/Right: rotate launch vector",
-            "Up/Down: adjust launch speed",
-            "Shift + arrows: fine adjustment",
-            "Drag from active point: set vx/vy",
-            "Space: relaunch selected body",
-            "P: pause   R: reset   C: clear trails",
-        ]
-        for index, line in enumerate(controls):
-            self.small_text(line, help_x + 18, 68 + index * 15)
+        self.draw_quick_controls()
 
     def draw_energy_readout(self) -> None:
         y = HEIGHT - 54
