@@ -28,10 +28,13 @@ EARTH_ICE = (232, 244, 250)
 SAT_GOLD = (255, 205, 87)
 WARNING = (255, 112, 112)
 GHOST = (190, 198, 211)
+EARTH_DEBRIS_COLORS = [EARTH_BLUE, EARTH_LAND, EARTH_ICE, (22, 64, 118), (42, 94, 64)]
 CRATER_DARK = (15, 9, 12)
 CRATER_RIM = (95, 47, 40)
 CRATER_GLOW = (255, 67, 37)
 CRATER_CORE = (255, 180, 72)
+CRATER_CRACK = (8, 5, 7)
+CRATER_CRACK_GLOW = (255, 95, 48)
 FIRE_COLORS = [(255, 230, 123), (255, 159, 64), (255, 80, 52), (255, 45, 28)]
 SMOKE_COLORS = [(90, 94, 103), (116, 119, 127), (148, 148, 151)]
 
@@ -55,6 +58,12 @@ NORMAL_TIME_INDEX = TIME_SCALES.index(1.00)
 MIN_CAMERA_ZOOM = 0.25
 MAX_CAMERA_ZOOM = 2.50
 ZOOM_STEP = 1.12
+CRATER_COOL_TIME = 420.0
+MAX_EARTH_CRATERS = 8
+IMPACT_SHAKE_DURATION = 34.0
+IMPACT_SHAKE_MAX = 22.0
+EARTH_IMPACT_LIMIT = 5
+EARTH_EXPLOSION_FORCE = 2500.0
 
 
 @dataclass
@@ -118,6 +127,8 @@ class EarthCrater:
     normal: pygame.Vector2
     radius: float
     glow: float = 1.0
+    age: float = 0.0
+    cracks: list[list[pygame.Vector2]] = field(default_factory=list)
 
 
 def acceleration(target: Body, bodies: list[Body]) -> pygame.Vector2:
@@ -221,10 +232,16 @@ class Simulator:
         self.time_scale = TIME_SCALES[self.time_index]
         self.particles: list[Particle] = []
         self.earth_craters: list[EarthCrater] = []
+        self.earth_impact_count = 0
+        self.earth_destroyed = False
         self.show_prediction = True
+        self.pause_on_impact = False
         self.show_hud = True
         self.camera_zoom = 1.0
         self.camera_offset = pygame.Vector2()
+        self.camera_shake_offset = pygame.Vector2()
+        self.camera_shake_strength = 0.0
+        self.camera_shake_time = 0.0
         self.panning_camera = False
         self.hud_button_rect = pygame.Rect(WIDTH // 2 - 34, 18, 68, 28)
         self.message = "Satellite selected. Set a vector, then press Space."
@@ -241,10 +258,17 @@ class Simulator:
         return pygame.Vector2(self.planet.pos) + self.camera_offset
 
     def world_to_screen(self, point: pygame.Vector2 | tuple[float, float]) -> pygame.Vector2:
-        return (pygame.Vector2(point) - self.camera_center()) * self.camera_zoom + CENTER
+        return (
+            (pygame.Vector2(point) - self.camera_center()) * self.camera_zoom
+            + CENTER
+            + self.camera_shake_offset
+        )
 
     def screen_to_world(self, point: pygame.Vector2 | tuple[float, float]) -> pygame.Vector2:
-        return (pygame.Vector2(point) - CENTER) / self.camera_zoom + self.camera_center()
+        return (
+            (pygame.Vector2(point) - CENTER - self.camera_shake_offset) / self.camera_zoom
+            + self.camera_center()
+        )
 
     def scaled_radius(self, radius: float, minimum: int = 1) -> int:
         return max(minimum, round(radius * self.camera_zoom))
@@ -263,6 +287,28 @@ class Simulator:
     def reset_camera_pan(self) -> None:
         self.camera_offset.update(0, 0)
         self.message = "Camera recentered on Earth."
+
+    def start_camera_shake(self, strength: float) -> None:
+        self.camera_shake_strength = max(
+            self.camera_shake_strength,
+            min(IMPACT_SHAKE_MAX, strength),
+        )
+        self.camera_shake_time = max(self.camera_shake_time, IMPACT_SHAKE_DURATION)
+
+    def update_camera_shake(self) -> None:
+        if self.camera_shake_time <= 0:
+            self.camera_shake_offset.update(0, 0)
+            self.camera_shake_strength = 0.0
+            return
+
+        falloff = self.camera_shake_time / IMPACT_SHAKE_DURATION
+        amount = self.camera_shake_strength * falloff * falloff
+        angle = random.uniform(0, math.tau)
+        self.camera_shake_offset = pygame.Vector2(
+            math.cos(angle) * amount,
+            math.sin(angle) * amount,
+        )
+        self.camera_shake_time = max(0.0, self.camera_shake_time - 1.0)
 
     def quick_buttons(self) -> list[tuple[pygame.Rect, str, str, bool]]:
         x = WIDTH - 370
@@ -314,6 +360,7 @@ class Simulator:
         add(0, 6, w3, "G -", "gravity_down")
         add(w3 + gap, 6, w3, "G 1x", "gravity_reset")
         add((w3 + gap) * 2, 6, w3, "G +", "gravity_up")
+        add(0, 7, wide, "Hit Pause", "pause_on_impact", self.pause_on_impact)
 
         return buttons
 
@@ -373,6 +420,8 @@ class Simulator:
                 self.reset_gravity_scale()
             elif action == "gravity_up":
                 self.adjust_gravity_scale(0.05)
+            elif action == "pause_on_impact":
+                self.toggle_pause_on_impact()
             elif action == "hud":
                 self.toggle_hud()
             return True
@@ -422,6 +471,17 @@ class Simulator:
         self.show_hud = not self.show_hud
         state = "shown" if self.show_hud else "hidden"
         self.message = f"HUD {state}."
+
+    def toggle_pause_on_impact(self) -> None:
+        self.pause_on_impact = not self.pause_on_impact
+        state = "enabled" if self.pause_on_impact else "disabled"
+        self.message = f"Pause on impact {state}."
+
+    def pause_for_impact(self) -> None:
+        if not self.pause_on_impact:
+            return
+        self.paused = True
+        self.message = f"{self.message} Paused on impact."
 
     def time_mode_label(self) -> str:
         if self.time_scale < 1.0:
@@ -522,7 +582,7 @@ class Simulator:
         )
 
     def prediction_path(self) -> list[tuple[int, int]]:
-        if not self.show_prediction:
+        if not self.show_prediction or self.earth_destroyed:
             return []
 
         target = self.predicted_body()
@@ -562,6 +622,10 @@ class Simulator:
         return moon.pos.distance_to(mouse_world_pos) <= moon.radius + 14 / self.camera_zoom
 
     def launch_satellite(self) -> None:
+        if self.earth_destroyed:
+            self.message = "Earth is gone. Press R to reset the system."
+            return
+
         if self.satellite and self.satellite in self.bodies:
             self.bodies.remove(self.satellite)
 
@@ -582,6 +646,10 @@ class Simulator:
         )
 
     def launch_moon(self) -> None:
+        if self.earth_destroyed:
+            self.message = "Earth is gone. Press R to reset the system."
+            return
+
         self.bodies = [body for body in self.bodies if body.name != "moon"]
         moon = Body(
             "moon",
@@ -606,6 +674,10 @@ class Simulator:
             self.launch_satellite()
 
     def auto_orbit_selected(self, reverse: bool = False) -> None:
+        if self.earth_destroyed:
+            self.message = "Earth is gone. Press R to reset the system."
+            return
+
         if self.selected_launch == "moon":
             vector = self.circular_orbit_vector_at(self.moon_launch_point(), reverse)
             self.set_vector_from_orbit("moon", vector)
@@ -619,6 +691,10 @@ class Simulator:
         self.message = f"{self.selected_launch.title()} placed in {direction}circular orbit."
 
     def apply_moon_velocity(self) -> None:
+        if self.earth_destroyed:
+            self.message = "Earth is gone. Press R to reset the system."
+            return
+
         moon = self.find_body("moon")
         if not moon or not moon.alive:
             self.launch_moon()
@@ -637,6 +713,11 @@ class Simulator:
         self.satellite = None
         self.particles.clear()
         self.earth_craters.clear()
+        self.earth_impact_count = 0
+        self.earth_destroyed = False
+        self.camera_shake_offset.update(0, 0)
+        self.camera_shake_strength = 0.0
+        self.camera_shake_time = 0.0
         self.message = "System reset with the current moon vector."
 
     def handle_key(self, key: int, mods: int) -> None:
@@ -672,6 +753,8 @@ class Simulator:
             self.show_prediction = not self.show_prediction
             state = "shown" if self.show_prediction else "hidden"
             self.message = f"Orbit prediction {state}."
+        elif key == pygame.K_i:
+            self.toggle_pause_on_impact()
         elif key == pygame.K_h:
             self.toggle_hud()
         elif key == pygame.K_f:
@@ -780,6 +863,7 @@ class Simulator:
             self.check_satellite_status()
             self.check_moon_status()
             self.emit_moon_flame_streak()
+        self.update_craters()
         self.update_particles()
 
     def step_paused_frame(self) -> None:
@@ -795,9 +879,15 @@ class Simulator:
         if len(self.particles) > MAX_PARTICLES:
             self.particles = self.particles[-MAX_PARTICLES:]
 
+    def update_craters(self) -> None:
+        for crater in self.earth_craters:
+            crater.age += self.time_scale
+            hot = max(0.0, 1.0 - crater.age / CRATER_COOL_TIME)
+            crater.glow = 0.18 + hot * 0.82
+
     def emit_moon_flame_streak(self) -> None:
         moon = self.find_body("moon")
-        if not moon or not moon.alive:
+        if self.earth_destroyed or not moon or not moon.alive:
             return
 
         distance = moon.pos.distance_to(self.planet.pos)
@@ -862,6 +952,8 @@ class Simulator:
             incoming_dir = incoming_dir.normalize()
         else:
             incoming_dir = -normal
+        relative_speed = (incoming.vel - self.planet.vel).length()
+        self.start_camera_shake(4.0 + impact_scale * 5.5 + relative_speed * 0.65)
 
         fire_count = int(42 * impact_scale)
         smoke_count = int(30 * impact_scale)
@@ -897,6 +989,70 @@ class Simulator:
                 )
             )
 
+    def earth_impact_force(self, incoming: Body, impact_scale: float) -> float:
+        relative_speed = (incoming.vel - self.planet.vel).length()
+        return incoming.mass * relative_speed * impact_scale
+
+    def register_earth_impact(self, incoming: Body, impact_scale: float) -> None:
+        if self.earth_destroyed:
+            return
+
+        self.earth_impact_count += 1
+        impact_force = self.earth_impact_force(incoming, impact_scale)
+        if impact_force >= EARTH_EXPLOSION_FORCE:
+            self.destroy_earth("catastrophic impact")
+        elif self.earth_impact_count >= EARTH_IMPACT_LIMIT:
+            self.destroy_earth("cumulative impacts")
+        else:
+            remaining = EARTH_IMPACT_LIMIT - self.earth_impact_count
+            self.message = (
+                f"{self.message} Earth integrity hit "
+                f"{self.earth_impact_count}/{EARTH_IMPACT_LIMIT}; {remaining} to rupture."
+            )
+
+    def destroy_earth(self, reason: str) -> None:
+        if self.earth_destroyed:
+            return
+
+        self.earth_destroyed = True
+        self.planet.alive = False
+        self.start_camera_shake(IMPACT_SHAKE_MAX)
+        self.spawn_earth_explosion()
+        self.message = f"Earth exploded from {reason}. Press R to rebuild the system."
+
+    def spawn_earth_explosion(self) -> None:
+        center = pygame.Vector2(self.planet.pos)
+        for _ in range(170):
+            angle = random.uniform(0, math.tau)
+            direction = pygame.Vector2(math.cos(angle), math.sin(angle))
+            speed = random.uniform(2.5, 9.2)
+            self.particles.append(
+                Particle(
+                    pos=center + direction * random.uniform(0, self.planet.radius * 0.95),
+                    vel=direction * speed + pygame.Vector2(random.uniform(-0.8, 0.8), random.uniform(-0.8, 0.8)),
+                    radius=random.uniform(2.0, 6.5),
+                    color=random.choice(FIRE_COLORS + EARTH_DEBRIS_COLORS),
+                    lifetime=random.uniform(58, 132),
+                    growth=random.uniform(-0.02, 0.055),
+                    drag=random.uniform(0.955, 0.985),
+                )
+            )
+
+        for _ in range(95):
+            angle = random.uniform(0, math.tau)
+            direction = pygame.Vector2(math.cos(angle), math.sin(angle))
+            self.particles.append(
+                Particle(
+                    pos=center + direction * random.uniform(self.planet.radius * 0.2, self.planet.radius * 1.1),
+                    vel=direction * random.uniform(0.8, 4.0),
+                    radius=random.uniform(6.5, 14.0),
+                    color=random.choice(SMOKE_COLORS),
+                    lifetime=random.uniform(108, 190),
+                    growth=random.uniform(0.035, 0.095),
+                    drag=random.uniform(0.972, 0.992),
+                )
+            )
+
     def create_earth_crater(self, incoming: Body) -> None:
         normal = incoming.pos - self.planet.pos
         if normal.length_squared() == 0:
@@ -905,8 +1061,48 @@ class Simulator:
             normal = normal.normalize()
 
         crater_radius = max(15.0, min(self.planet.radius * 0.58, incoming.radius * 1.7))
-        self.earth_craters.append(EarthCrater(normal=normal, radius=crater_radius))
-        self.earth_craters = self.earth_craters[-4:]
+        self.earth_craters.append(
+            EarthCrater(
+                normal=normal,
+                radius=crater_radius,
+                cracks=self.generate_cracks(normal, crater_radius),
+            )
+        )
+        self.earth_craters = self.earth_craters[-MAX_EARTH_CRATERS:]
+
+    def generate_cracks(self, normal: pygame.Vector2, radius: float) -> list[list[pygame.Vector2]]:
+        tangent = normal.rotate(90)
+        inward = -normal
+        cracks: list[list[pygame.Vector2]] = []
+        crack_count = random.randint(5, 7)
+        for index in range(crack_count):
+            side_bias = -1 if index % 2 == 0 else 1
+            angle_bias = side_bias * random.uniform(0.14, 0.92)
+            direction = inward * random.uniform(0.12, 0.52) + tangent * angle_bias
+            if direction.length_squared() == 0:
+                direction = tangent * side_bias
+            direction = direction.normalize()
+
+            point = direction * random.uniform(radius * 0.20, radius * 0.34)
+            points = [pygame.Vector2(point)]
+            segment_count = random.randint(2, 4)
+            segment_length = random.uniform(radius * 0.18, radius * 0.31)
+            for _ in range(segment_count):
+                direction = direction.rotate(random.uniform(-18, 18))
+                point = point + direction * segment_length * random.uniform(0.82, 1.18)
+                points.append(pygame.Vector2(point))
+            cracks.append(points)
+
+            if random.random() < 0.45 and len(points) >= 3:
+                branch_origin = random.choice(points[1:-1])
+                branch_dir = direction.rotate(random.choice([-1, 1]) * random.uniform(32, 58))
+                branch = [
+                    pygame.Vector2(branch_origin),
+                    pygame.Vector2(branch_origin + branch_dir * radius * random.uniform(0.22, 0.38)),
+                ]
+                cracks.append(branch)
+
+        return cracks
 
     def check_satellite_status(self) -> None:
         if not self.satellite or not self.satellite.alive:
@@ -919,7 +1115,11 @@ class Simulator:
                 self.satellite.alive = False
                 self.message = f"Satellite impacted the {body.name}."
                 if body is self.planet:
+                    self.create_earth_crater(self.satellite)
                     self.spawn_impact(self.satellite, impact_scale=1.0)
+                    self.register_earth_impact(self.satellite, impact_scale=1.0)
+                self.pause_for_impact()
+                return
 
         margin = 1200
         if (
@@ -933,7 +1133,7 @@ class Simulator:
 
     def check_moon_status(self) -> None:
         moon = self.find_body("moon")
-        if not moon or not moon.alive:
+        if self.earth_destroyed or not moon or not moon.alive:
             return
 
         if moon.pos.distance_to(self.planet.pos) <= self.planet.radius + moon.radius:
@@ -941,6 +1141,9 @@ class Simulator:
             self.message = "Moon impacted the planet."
             self.create_earth_crater(moon)
             self.spawn_impact(moon, impact_scale=1.8)
+            self.register_earth_impact(moon, impact_scale=1.8)
+            self.pause_for_impact()
+            return
 
         margin = 1200
         if (
@@ -1117,6 +1320,51 @@ class Simulator:
         rect = earth.get_rect(center=(round(screen_pos.x), round(screen_pos.y)))
         self.screen.blit(earth, rect)
 
+    def draw_destroyed_earth(self, pos: pygame.Vector2) -> None:
+        earth = self.earth_surface.copy()
+        for crater in self.earth_craters:
+            self.draw_earth_crater(earth, crater)
+
+        center = pygame.Vector2(earth.get_width() / 2, earth.get_height() / 2)
+        radius = self.planet.radius
+        damage_surface = pygame.Surface(earth.get_size(), pygame.SRCALPHA)
+
+        missing_chunks = [
+            [(0.18, -0.96), (0.78, -0.58), (0.55, -0.12), (0.15, -0.28)],
+            [(-0.88, 0.22), (-0.42, 0.05), (-0.23, 0.52), (-0.62, 0.82)],
+            [(0.18, 0.62), (0.64, 0.42), (0.90, 0.86), (0.38, 1.02)],
+        ]
+        for chunk in missing_chunks:
+            points = [(center.x + x * radius, center.y + y * radius) for x, y in chunk]
+            pygame.draw.polygon(damage_surface, (2, 3, 7, 230), points)
+            pygame.draw.lines(damage_surface, (*CRATER_GLOW, 150), True, points, 1)
+
+        fault_lines = [
+            [(-0.72, -0.42), (-0.25, -0.18), (0.12, 0.18), (0.66, 0.38)],
+            [(-0.18, -0.88), (-0.10, -0.26), (-0.32, 0.30), (-0.16, 0.86)],
+            [(0.62, -0.72), (0.18, -0.30), (-0.08, 0.12), (-0.62, 0.46)],
+            [(-0.50, 0.02), (-0.12, -0.05), (0.30, -0.04), (0.84, -0.22)],
+        ]
+        for line in fault_lines:
+            points = [(center.x + x * radius, center.y + y * radius) for x, y in line]
+            pygame.draw.lines(damage_surface, (4, 3, 5, 230), False, points, 4)
+            pygame.draw.lines(damage_surface, (*CRATER_CRACK_GLOW, 120), False, points, 1)
+
+        pygame.draw.circle(damage_surface, (*CRATER_GLOW, 120), center, max(3, int(radius * 0.28)))
+        pygame.draw.circle(damage_surface, (255, 185, 82, 170), center, max(2, int(radius * 0.13)))
+        earth.blit(damage_surface, (0, 0))
+
+        if self.camera_zoom != 1.0:
+            scaled_size = (
+                max(4, round(earth.get_width() * self.camera_zoom)),
+                max(4, round(earth.get_height() * self.camera_zoom)),
+            )
+            earth = pygame.transform.smoothscale(earth, scaled_size)
+
+        screen_pos = self.world_to_screen(pos)
+        rect = earth.get_rect(center=(round(screen_pos.x), round(screen_pos.y)))
+        self.screen.blit(earth, rect)
+
     def crater_polygon(
         self,
         center: pygame.Vector2,
@@ -1150,6 +1398,7 @@ class Simulator:
         bite_radius = max(6, int(crater.radius * 0.72))
         pygame.draw.circle(surface, (0, 0, 0, 0), bite_center, bite_radius)
 
+        heat = max(0.0, min(1.0, (crater.glow - 0.18) / 0.82))
         glow_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
         for scale, alpha in [(1.45, 58), (1.05, 95), (0.66, 150)]:
             pygame.draw.polygon(
@@ -1169,31 +1418,75 @@ class Simulator:
             CRATER_DARK,
             self.crater_polygon(crater_center + normal * 1.5, normal, crater.radius * 0.78, 0.38),
         )
+
+        crack_surface = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        for crack in crater.cracks:
+            if len(crack) < 2:
+                continue
+            points = []
+            for point in crack:
+                crack_point = crater_center + point
+                if crack_point.distance_to(center) <= self.planet.radius * 0.98:
+                    points.append((crack_point.x, crack_point.y))
+            if len(points) < 2:
+                continue
+            pygame.draw.lines(
+                crack_surface,
+                (*CRATER_CRACK, 190),
+                False,
+                points,
+                max(1, int(crater.radius * 0.08)),
+            )
+            if heat > 0.04:
+                pygame.draw.lines(
+                    crack_surface,
+                    (*CRATER_CRACK_GLOW, int(165 * heat)),
+                    False,
+                    points,
+                    1,
+                )
+        surface.blit(crack_surface, (0, 0))
+
+        molten_color = (
+            int(CRATER_GLOW[0] * heat + CRATER_RIM[0] * (1.0 - heat)),
+            int(CRATER_GLOW[1] * heat + CRATER_RIM[1] * (1.0 - heat)),
+            int(CRATER_GLOW[2] * heat + CRATER_RIM[2] * (1.0 - heat)),
+        )
+        core_color = (
+            int(CRATER_CORE[0] * heat + CRATER_GLOW[0] * (1.0 - heat)),
+            int(CRATER_CORE[1] * heat + CRATER_RIM[1] * (1.0 - heat)),
+            int(CRATER_CORE[2] * heat + CRATER_RIM[2] * (1.0 - heat)),
+        )
         pygame.draw.polygon(
             surface,
-            CRATER_GLOW,
+            molten_color,
             self.crater_polygon(crater_center - normal * 1.0, normal, crater.radius * 0.48, 0.30),
         )
         pygame.draw.circle(
             surface,
-            CRATER_CORE,
+            core_color,
             crater_center - normal * (crater.radius * 0.08),
-            max(2, int(crater.radius * 0.18)),
+            max(2, int(crater.radius * (0.10 + 0.08 * heat))),
         )
 
     def draw_bodies(self) -> None:
         for body in self.bodies:
+            if body.name == "planet":
+                if self.earth_destroyed:
+                    self.draw_destroyed_earth(body.pos)
+                elif body.alive:
+                    self.draw_earth(body.pos)
+                continue
             if not body.alive:
                 continue
-            if body.name == "planet":
-                self.draw_earth(body.pos)
-            else:
-                screen_pos = self.world_to_screen(body.pos)
-                radius = self.scaled_radius(body.radius, minimum=2)
-                pygame.draw.circle(self.screen, body.color, screen_pos, radius)
-                pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, radius, 1)
+            screen_pos = self.world_to_screen(body.pos)
+            radius = self.scaled_radius(body.radius, minimum=2)
+            pygame.draw.circle(self.screen, body.color, screen_pos, radius)
+            pygame.draw.circle(self.screen, (255, 255, 255), screen_pos, radius, 1)
 
         if not self.show_hud:
+            return
+        if self.earth_destroyed:
             return
 
         satellite_launch = self.satellite_launch_point()
@@ -1295,7 +1588,7 @@ class Simulator:
 
     def draw_quick_controls(self) -> None:
         help_x = WIDTH - 388
-        help_rect = pygame.Rect(help_x, 18, 370, 382)
+        help_rect = pygame.Rect(help_x, 18, 370, 416)
         pygame.draw.rect(self.screen, PANEL, help_rect, border_radius=8)
         pygame.draw.rect(self.screen, (55, 66, 88), help_rect, 1, border_radius=8)
         self.text("Quick Controls", help_x + 18, 34)
@@ -1314,10 +1607,11 @@ class Simulator:
             "Mouse wheel zooms. Right drag pans.",
             "Click/drag moon to edit live velocity.",
             "Arrows tune selected launch vector.",
+            "I toggles pause on impact.",
             "Keyboard shortcuts still work.",
         ]
         for index, line in enumerate(hints):
-            self.small_text(line, help_x + 18, 318 + index * 15)
+            self.small_text(line, help_x + 18, 352 + index * 15)
 
     def draw_panel(self) -> None:
         panel_rect = pygame.Rect(18, 18, 430, 342)
@@ -1345,8 +1639,17 @@ class Simulator:
             142,
             TEXT,
         )
-        if pan_distance > 1:
+        if self.earth_destroyed:
+            self.small_text("earth destroyed", 260, 120, WARNING)
+        elif pan_distance > 1:
             self.small_text(f"camera pan {pan_distance:.0f}px", 260, 120, MUTED)
+        elif self.earth_impact_count > 0:
+            self.small_text(
+                f"earth hits {self.earth_impact_count}/{EARTH_IMPACT_LIMIT}",
+                260,
+                120,
+                WARNING,
+            )
         self.small_text("Satellite vector", 35, 170, ORBIT_BLUE)
         self.text(
             f"vx {self.satellite_vector.x:6.2f}  vy {self.satellite_vector.y:6.2f}",
@@ -1374,7 +1677,7 @@ class Simulator:
         moon = self.find_body("moon")
         lost_satellite = self.satellite and not self.satellite.alive
         lost_moon = moon and not moon.alive
-        status_color = WARNING if lost_satellite or lost_moon else MUTED
+        status_color = WARNING if self.earth_destroyed or lost_satellite or lost_moon else MUTED
         self.small_text(self.message, 35, 326, status_color)
 
         self.draw_quick_controls()
@@ -1404,6 +1707,7 @@ class Simulator:
         )
 
     def draw(self) -> None:
+        self.update_camera_shake()
         self.screen.fill(BACKGROUND)
         self.draw_grid()
         if self.show_hud:

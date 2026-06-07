@@ -4,11 +4,15 @@ A 2D gravity simulator built with Python and Pygame. It starts with a visual Ear
 
 Planet impacts now create a visual plume with bright fire particles and slower smoke puffs.
 
+Impacts also kick the camera with a quick shake, scaled by the force of the hit.
+
 A faint gray ghost path predicts the selected launch trajectory before launch.
 
 Close moon passes now generate a fiery atmospheric streak behind the moon.
 
-Moon impacts now permanently scar Earth with a dented crater and red-hot impact site.
+Moon impacts now permanently scar Earth with a dented crater, red-hot impact site, cooling glow, and subtle fracture cracks.
+
+If Earth takes five impacts, or one impact above the catastrophic force threshold, it explodes into fire, smoke, and debris while keeping its crater scars visible on the shattered remnant.
 
 ## Run
 
@@ -24,6 +28,7 @@ Most common actions are now clickable in the **Quick Controls** panel:
 - `Sat` / `Moon`: choose the launch target
 - `Launch`, `Orbit`, `Rev`: launch normally, auto-orbit, or reverse auto-orbit
 - `Pause`, `Step`, `Reset`, `Clear`, `Ghost`, `Center`: simulation and view actions
+- `Hit Pause`: toggle automatic pause when the moon or satellite impacts another body
 - `Time -`, `1x`, `Time +`: scrub simulation speed
 - `Earth`, `Moon`, `Sat`, `G -`, `G 1x`, `G +`: choose and adjust gravity
 
@@ -42,6 +47,7 @@ Keyboard and mouse shortcuts still work:
 - `Shift` + `[` / `]`: make a larger gravity adjustment
 - `0`: reset the selected gravity multiplier to `1.00x`
 - `G`: show or hide the orbit prediction ghost path
+- `I`: toggle pause on impact
 - `,` / `.`: scrub the simulation time speed down or up
 - `Shift` + `,` / `.`: scrub time in larger jumps
 - `T`: return to normal `1.00x` time
