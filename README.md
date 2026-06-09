@@ -2,11 +2,15 @@
 
 A 2D gravity simulator built with Python and Pygame. It starts with a visual Earth and moon, then lets you launch either the satellite or the moon with a specific velocity vector and watch whether the body impacts, escapes, or settles into orbit.
 
+Update 2.0 adds a start screen with the Earth-Moon Sim mode and a disabled Coming Soon mode, while the simulation animates in the background.
+
 Planet impacts now create a visual plume with bright fire particles and slower smoke puffs.
 
 Impacts also kick the camera with a quick shake, scaled by the force of the hit.
 
 A faint gray ghost path predicts the selected launch trajectory before launch.
+
+The ghost path now marks likely impacts, escapes, and bound-orbit predictions before launch, including impact force meters and catastrophic Earth-rupture warnings.
 
 Close moon passes now generate a fiery atmospheric streak behind the moon.
 
@@ -24,6 +28,8 @@ python orbital_mechanic.py
 ## Controls
 
 Most common actions are now clickable in the **Quick Controls** panel:
+
+- On the start screen, click `Earth-Moon Sim` or press `Enter` / `Space` to begin
 
 - `Sat` / `Moon`: choose the launch target
 - `Launch`, `Orbit`, `Rev`: launch normally, auto-orbit, or reverse auto-orbit

@@ -131,6 +131,18 @@ class EarthCrater:
     cracks: list[list[pygame.Vector2]] = field(default_factory=list)
 
 
+@dataclass
+class PredictionResult:
+    points: list[tuple[int, int]]
+    outcome: str = "hidden"
+    target_name: str = ""
+    event_point: tuple[int, int] | None = None
+    steps: int = 0
+    impact_force: float = 0.0
+    catastrophic: bool = False
+    rupture_warning: bool = False
+
+
 def acceleration(target: Body, bodies: list[Body]) -> pygame.Vector2:
     total = pygame.Vector2()
     for other in bodies:
@@ -210,6 +222,7 @@ class Simulator:
         self.font = pygame.font.SysFont("consolas", 18)
         self.small_font = pygame.font.SysFont("consolas", 15)
         self.title_font = pygame.font.SysFont("consolas", 24, bold=True)
+        self.hero_font = pygame.font.SysFont("consolas", 42, bold=True)
         self.bodies = make_system()
         self.gravity_scales = {"earth": 1.0, "moon": 1.0, "satellite": 1.0}
         self.gravity_target = "earth"
@@ -242,9 +255,15 @@ class Simulator:
         self.camera_shake_offset = pygame.Vector2()
         self.camera_shake_strength = 0.0
         self.camera_shake_time = 0.0
+        self.last_prediction: PredictionResult | None = None
         self.panning_camera = False
+        self.mode = "menu"
+        self.menu_buttons = {
+            "earth_moon": pygame.Rect(WIDTH // 2 - 150, HEIGHT // 2 + 18, 300, 48),
+            "coming_soon": pygame.Rect(WIDTH // 2 - 150, HEIGHT // 2 + 82, 300, 48),
+        }
         self.hud_button_rect = pygame.Rect(WIDTH // 2 - 34, 18, 68, 28)
-        self.message = "Satellite selected. Set a vector, then press Space."
+        self.message = "Choose Earth-Moon Sim to begin."
         self.update_launch_vectors()
 
     @property
@@ -581,9 +600,9 @@ class Simulator:
             gravity_scale=self.gravity_scales["satellite"],
         )
 
-    def prediction_path(self) -> list[tuple[int, int]]:
+    def predict_launch(self) -> PredictionResult:
         if not self.show_prediction or self.earth_destroyed:
-            return []
+            return PredictionResult([])
 
         target = self.predicted_body()
         prediction_bodies = [
@@ -603,7 +622,22 @@ class Simulator:
                 if body is target or not body.alive:
                     continue
                 if target.pos.distance_to(body.pos) <= target.radius + body.radius:
-                    return points
+                    impact_force = self.predicted_impact_force(target, body)
+                    earth_hit = body.name == "planet"
+                    catastrophic = earth_hit and impact_force >= EARTH_EXPLOSION_FORCE
+                    rupture_warning = earth_hit and (
+                        catastrophic or self.earth_impact_count + 1 >= EARTH_IMPACT_LIMIT
+                    )
+                    return PredictionResult(
+                        points=points,
+                        outcome="impact",
+                        target_name=body.name,
+                        event_point=(round(target.pos.x), round(target.pos.y)),
+                        steps=step + 1,
+                        impact_force=impact_force,
+                        catastrophic=catastrophic,
+                        rupture_warning=rupture_warning,
+                    )
 
             if (
                 target.pos.x < -PREDICTION_MARGIN
@@ -611,9 +645,34 @@ class Simulator:
                 or target.pos.y < -PREDICTION_MARGIN
                 or target.pos.y > HEIGHT + PREDICTION_MARGIN
             ):
-                return points
+                return PredictionResult(
+                    points=points,
+                    outcome="escape",
+                    event_point=(round(target.pos.x), round(target.pos.y)),
+                    steps=step + 1,
+                )
 
-        return points
+        relative_speed = (target.vel - self.planet.vel).length()
+        distance = max(target.pos.distance_to(self.planet.pos), 1)
+        earth_gravity = self.planet.mass * self.planet.gravity_scale
+        specific_energy = 0.5 * relative_speed * relative_speed - G * earth_gravity / distance
+        outcome = "bound" if specific_energy < 0 else "uncertain"
+        return PredictionResult(
+            points=points,
+            outcome=outcome,
+            event_point=points[-1] if points else None,
+            steps=PREDICTION_STEPS,
+        )
+
+    def prediction_path(self) -> list[tuple[int, int]]:
+        return self.predict_launch().points
+
+    def predicted_impact_force(self, target: Body, hit_body: Body) -> float:
+        impact_scale = 1.0
+        if hit_body.name == "planet" and target.name == "moon":
+            impact_scale = 1.8
+        relative_speed = (target.vel - hit_body.vel).length()
+        return target.mass * relative_speed * impact_scale
 
     def is_clicking_moon(self, mouse_world_pos: pygame.Vector2) -> bool:
         moon = self.find_body("moon")
@@ -805,6 +864,9 @@ class Simulator:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return False
+            if self.mode == "menu":
+                self.handle_menu_event(event)
+                continue
             if event.type == pygame.KEYDOWN:
                 self.handle_key(event.key, pygame.key.get_mods())
             if event.type == pygame.MOUSEWHEEL:
@@ -850,6 +912,22 @@ class Simulator:
                             f"vx={vector.x:.2f}, vy={vector.y:.2f}"
                         )
         return True
+
+    def handle_menu_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.start_earth_moon_sim()
+            elif event.key == pygame.K_ESCAPE:
+                self.message = "Choose Earth-Moon Sim to begin."
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.menu_buttons["earth_moon"].collidepoint(event.pos):
+                self.start_earth_moon_sim()
+            elif self.menu_buttons["coming_soon"].collidepoint(event.pos):
+                self.message = "That mode is coming soon."
+
+    def start_earth_moon_sim(self) -> None:
+        self.mode = "sim"
+        self.message = "Earth-Moon Sim loaded. Set a vector, then press Space."
 
     def update(self) -> None:
         if self.paused or (self.dragging and self.drag_target == "moon"):
@@ -1187,7 +1265,9 @@ class Simulator:
             pygame.draw.lines(self.screen, body.trail_color, False, points, 2)
 
     def draw_prediction(self) -> None:
-        points = self.prediction_path()
+        prediction = self.predict_launch()
+        self.last_prediction = prediction
+        points = prediction.points
         if len(points) < 2:
             return
 
@@ -1213,6 +1293,90 @@ class Simulator:
             pygame.draw.circle(ghost_surface, (*GHOST, alpha), point, 2)
 
         self.screen.blit(ghost_surface, (0, 0))
+
+    def prediction_label(self, prediction: PredictionResult | None) -> tuple[str, tuple[int, int, int]]:
+        if not prediction or prediction.outcome == "hidden":
+            return "", MUTED
+        if prediction.outcome == "impact":
+            target = "Earth" if prediction.target_name == "planet" else prediction.target_name.title()
+            force_text = f"force {prediction.impact_force:,.0f}" if prediction.impact_force else "force --"
+            if prediction.catastrophic:
+                return f"Catastrophic: {target} | {force_text}", CRATER_CORE
+            if prediction.rupture_warning:
+                return f"Rupture: {target} | {force_text}", CRATER_GLOW
+            return f"Impact likely: {target} | {force_text}", WARNING
+        if prediction.outcome == "escape":
+            return "Escape likely", ORBIT_BLUE
+        if prediction.outcome == "bound":
+            return "Orbit likely", (114, 222, 146)
+        return "Uncertain path", SAT_GOLD
+
+    def draw_prediction_event(self, prediction: PredictionResult) -> None:
+        label, color = self.prediction_label(prediction)
+        if not label or prediction.event_point is None:
+            return
+
+        event_screen = self.world_to_screen(prediction.event_point)
+        if prediction.outcome == "impact":
+            marker_color = color
+            marker_radius = 14 if prediction.catastrophic else 11
+            if prediction.catastrophic:
+                pygame.draw.circle(self.screen, (*CRATER_GLOW,), event_screen, marker_radius + 5, 1)
+            pygame.draw.circle(self.screen, marker_color, event_screen, marker_radius, 2)
+            offset = pygame.Vector2(7, 7)
+            pygame.draw.line(self.screen, marker_color, event_screen - offset, event_screen + offset, 2)
+            pygame.draw.line(
+                self.screen,
+                marker_color,
+                event_screen + pygame.Vector2(-offset.x, offset.y),
+                event_screen + pygame.Vector2(offset.x, -offset.y),
+                2,
+            )
+        elif prediction.outcome == "escape":
+            pygame.draw.circle(self.screen, ORBIT_BLUE, event_screen, 8, 2)
+        elif prediction.outcome == "bound":
+            pygame.draw.circle(self.screen, (114, 222, 146), event_screen, 7, 1)
+
+        label_surface = self.small_font.render(label, True, color)
+        label_rect = label_surface.get_rect(
+            midleft=(round(event_screen.x) + 14, round(event_screen.y) - 12)
+        )
+        label_bounds = pygame.Rect(6, 6, WIDTH - 12, HEIGHT - 12)
+        if self.show_hud:
+            label_bounds = pygame.Rect(456, 6, 330, HEIGHT - 12)
+        label_rect.clamp_ip(label_bounds)
+        meter_height = 9 if prediction.outcome == "impact" and prediction.impact_force > 0 else 0
+        bg_rect = label_rect.inflate(12, 8 + meter_height)
+        bg_surface = pygame.Surface(bg_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(bg_surface, (*PANEL, 205), bg_surface.get_rect(), border_radius=6)
+        pygame.draw.rect(bg_surface, (*color, 150), bg_surface.get_rect(), 1, border_radius=6)
+        self.screen.blit(bg_surface, bg_rect)
+        self.screen.blit(label_surface, label_rect)
+        self.draw_prediction_force_meter(prediction, bg_rect, color)
+
+    def draw_prediction_force_meter(
+        self,
+        prediction: PredictionResult,
+        bg_rect: pygame.Rect,
+        color: tuple[int, int, int],
+    ) -> None:
+        if prediction.outcome != "impact" or prediction.impact_force <= 0:
+            return
+
+        meter_rect = pygame.Rect(bg_rect.x + 6, bg_rect.bottom - 10, bg_rect.width - 12, 4)
+        pygame.draw.rect(self.screen, (45, 50, 64), meter_rect, border_radius=2)
+        fill_ratio = min(1.0, prediction.impact_force / EARTH_EXPLOSION_FORCE)
+        fill_rect = pygame.Rect(meter_rect.x, meter_rect.y, max(2, int(meter_rect.width * fill_ratio)), meter_rect.height)
+        pygame.draw.rect(self.screen, color, fill_rect, border_radius=2)
+        if prediction.target_name == "planet":
+            threshold_x = meter_rect.x + meter_rect.width - 1
+            pygame.draw.line(
+                self.screen,
+                CRATER_CORE,
+                (threshold_x, meter_rect.y - 2),
+                (threshold_x, meter_rect.bottom + 2),
+                1,
+            )
 
     def draw_vector_arrow(
         self,
@@ -1571,12 +1735,17 @@ class Simulator:
         label: str,
         active: bool = False,
         color: tuple[int, int, int] = MUTED,
+        disabled: bool = False,
     ) -> None:
-        fill = (34, 43, 61) if not active else (46, 83, 111)
-        border = (76, 91, 117) if not active else ORBIT_BLUE
+        fill = (28, 31, 42) if disabled else (34, 43, 61)
+        if active:
+            fill = (46, 83, 111)
+        border = (56, 62, 78) if disabled else (76, 91, 117)
+        if active:
+            border = ORBIT_BLUE
         pygame.draw.rect(self.screen, fill, rect, border_radius=6)
         pygame.draw.rect(self.screen, border, rect, 1, border_radius=6)
-        text_color = TEXT if active else color
+        text_color = (92, 101, 120) if disabled else (TEXT if active else color)
         rendered = self.small_font.render(label, True, text_color)
         self.screen.blit(
             rendered,
@@ -1585,6 +1754,53 @@ class Simulator:
                 rect.centery - rendered.get_height() // 2,
             ),
         )
+
+    def draw_menu_button(self, rect: pygame.Rect, label: str, active: bool = False, disabled: bool = False) -> None:
+        fill = (46, 83, 111) if active else (27, 33, 48)
+        border = ORBIT_BLUE if active else (82, 96, 124)
+        if disabled:
+            fill = (24, 27, 36)
+            border = (55, 61, 78)
+        pygame.draw.rect(self.screen, fill, rect, border_radius=8)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=8)
+        text_color = TEXT if not disabled else (112, 120, 138)
+        rendered = self.font.render(label, True, text_color)
+        self.screen.blit(
+            rendered,
+            (
+                rect.centerx - rendered.get_width() // 2,
+                rect.centery - rendered.get_height() // 2,
+            ),
+        )
+
+    def draw_start_screen(self) -> None:
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((5, 8, 14, 178))
+        self.screen.blit(overlay, (0, 0))
+
+        title = self.hero_font.render("Orbital Mechanics Simulator", True, TEXT)
+        subtitle = self.font.render("Update 2.0", True, ORBIT_BLUE)
+        prompt = self.small_font.render("Select a mode", True, MUTED)
+        self.screen.blit(title, (WIDTH // 2 - title.get_width() // 2, HEIGHT // 2 - 160))
+        self.screen.blit(subtitle, (WIDTH // 2 - subtitle.get_width() // 2, HEIGHT // 2 - 104))
+        self.screen.blit(prompt, (WIDTH // 2 - prompt.get_width() // 2, HEIGHT // 2 - 58))
+
+        mouse_pos = pygame.mouse.get_pos()
+        self.draw_menu_button(
+            self.menu_buttons["earth_moon"],
+            "Earth-Moon Sim",
+            active=self.menu_buttons["earth_moon"].collidepoint(mouse_pos),
+        )
+        self.draw_menu_button(
+            self.menu_buttons["coming_soon"],
+            "Coming Soon",
+            active=False,
+            disabled=True,
+        )
+
+        if self.message:
+            message = self.small_font.render(self.message, True, MUTED)
+            self.screen.blit(message, (WIDTH // 2 - message.get_width() // 2, HEIGHT // 2 + 154))
 
     def draw_quick_controls(self) -> None:
         help_x = WIDTH - 388
@@ -1710,16 +1926,23 @@ class Simulator:
         self.update_camera_shake()
         self.screen.fill(BACKGROUND)
         self.draw_grid()
-        if self.show_hud:
+        menu_mode = self.mode == "menu"
+        hud_visible = self.show_hud and not menu_mode
+        if hud_visible:
             self.draw_prediction()
         self.draw_trails()
         self.draw_bodies()
         self.draw_particles()
-        if self.show_hud:
+        if hud_visible and self.last_prediction:
+            self.draw_prediction_event(self.last_prediction)
+        if hud_visible:
             self.draw_panel()
             self.draw_energy_readout()
-        self.draw_hud_button()
-        if self.paused and self.show_hud:
+        if menu_mode:
+            self.draw_start_screen()
+        else:
+            self.draw_hud_button()
+        if self.paused and hud_visible:
             paused = self.title_font.render("PAUSED", True, WARNING)
             self.screen.blit(paused, (WIDTH // 2 - paused.get_width() // 2, 30))
         pygame.display.flip()
